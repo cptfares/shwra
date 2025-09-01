@@ -1,0 +1,6 @@
+livekit-agents[openai, cartesia, elevenlabs, deepgram, silero, turn-detector,elevenlabs, azure]>=1.2
+python-dotenv>=1.0
+aiohttp
+tzdata
+pytest
+pytest-asyncio

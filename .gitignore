@@ -1,0 +1,20 @@
+# Environment variables
+.env
+
+# Python virtual environment
+venv/
+onyx-gift-434915-h8-1dbe0172d87e.json
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+onyx-gift-434915-h8-1dbe0172d87e.json
+
+# IDE specific files
+.vscode/
+.idea/
+
+# Local development files
+*.log
+.DS_Store
