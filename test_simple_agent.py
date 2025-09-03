@@ -18,6 +18,22 @@ from livekit.agents import (
 )
 from livekit.plugins import openai, azure, elevenlabs, silero
 
+# Enhanced noise cancellation for better Arabic speech recognition
+try:
+    from livekit.plugins import noise_cancellation
+    NOISE_CANCELLATION_AVAILABLE = True
+except ImportError:
+    NOISE_CANCELLATION_AVAILABLE = False
+    print("Warning: Noise cancellation not available. Install with: pip install 'livekit-plugins-noise-cancellation~=0.2'")
+
+# Turn detection for better conversational flow
+try:
+    from livekit.plugins.turn_detector.multilingual import MultilingualModel
+    TURN_DETECTOR_AVAILABLE = True
+except ImportError:
+    TURN_DETECTOR_AVAILABLE = False
+    print("Warning: Turn detector not available. Install with: pip install 'livekit-agents[turn-detector]~=1.2'")
+
 # Google Sheets integration
 try:
     import gspread
@@ -62,16 +78,52 @@ class GoogleSheetsManager:
         ]
         self.worksheet.update(values=[headers], range_name='A1:I1')
     
+    def _normalize_service_type(self, service_type: str) -> str:
+        """Map any input to one of: 'استشارة قانونية', 'خدمة قضائية'."""
+        text = (service_type or "").strip().lower()
+        if "استشارة" in text or "consult" in text:
+            return "استشارة قانونية"
+        # Heuristics for judicial/legal service
+        legal_keywords = [
+            "قضية", "قضائي", "دعوى", "محكمة", "مذكرة", "عقد", "توثيق", "ترجمة", "تمثيل"
+        ]
+        if any(k in text for k in legal_keywords):
+            return "خدمة قضائية"
+        # Default bucket if unclear
+        return "استشارة قانونية"
+
+    def _normalize_urgency(self, urgency: str) -> str:
+        """Map any input to one of: 'عادي', 'مستعجل', 'بأسرع وقت ممكن'."""
+        text = (urgency or "").strip().lower()
+        if not text:
+            return "عادي"
+
+        asap_keywords = ["أسرع", "الاسرع", "بأسرع وقت", "حالاً", "الآن", "فوري", "asap"]
+        urgent_keywords = ["مستعجل", "عاجل", "بسرعة", "ضروري", "مهم"]
+        normal_keywords = ["عادي", "عادى", "غير مستعجل", "مو مستعجل", "بالراحة"]
+
+        if any(k in text for k in asap_keywords):
+            return "بأسرع وقت ممكن"
+        if any(k in text for k in urgent_keywords):
+            return "مستعجل"
+        if any(k in text for k in normal_keywords):
+            return "عادي"
+
+        # Fallback to normal if unclear
+        return "عادي"
+
     def add_client_record(self, client_data: ClientData) -> bool:
         try:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            normalized_service_type = self._normalize_service_type(client_data.service_type)
+            normalized_urgency = self._normalize_urgency(client_data.urgency)
             row = [
                 timestamp,
                 client_data.full_name,
                 client_data.phone_number,
-                client_data.service_type,
+                normalized_service_type,
                 client_data.case_details,
-                client_data.urgency,
+                normalized_urgency,
                 client_data.location,
                 client_data.intent,
                 'New Lead'
@@ -434,14 +486,18 @@ async def entrypoint(ctx: JobContext):
             parallel_tool_calls=False, 
             temperature=0.6
         ),
-        tts=azure.TTS(
-            speech_key=os.getenv("AZURE_SPEECH_KEY"),
-            speech_region=os.getenv("AZURE_SPEECH_REGION"),
-            language="ar-SA",
-            voice="ar-SA-HamedNeural"
+        tts=openai.TTS.with_azure(
+            model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            voice="alloy",
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("OPENAI_API_VERSION"),
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
         ),
         vad=silero.VAD.load(),
         max_tool_steps=2,  # Increased to allow for intent recognition + action
+        # Turn detection for better conversational flow in Arabic
+        turn_detection=MultilingualModel() if TURN_DETECTOR_AVAILABLE else None,
     )
     
     await session.start(
