@@ -17,6 +17,7 @@ from livekit.agents import (
     function_tool,
 )
 from livekit.plugins import openai, azure, elevenlabs, silero
+import requests
 
 # Enhanced noise cancellation for better Arabic speech recognition
 try:
@@ -455,12 +456,82 @@ class ShuraLegalAgent(Agent):
         
         return "أي معلومات محددة تحتاجها عن منصة شورى؟"  
 
+def upload_session_to_supabase(
+    session_id: str,
+    start_time: datetime.datetime,
+    livekit_room_name: str = None,
+    livekit_participant_id: str = None,
+    status: str = "active"
+):
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    user_id = os.getenv("SUPABASE_USER_ID")
+    table = "agent_sessions"
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "user_id": user_id,
+        "session_id": session_id,
+        "start_time": start_time.isoformat(),
+        "livekit_room_name": livekit_room_name,
+        "livekit_participant_id": livekit_participant_id,
+        "status": status
+    }
+    response = requests.post(
+        f"{supabase_url}/rest/v1/{table}",
+        headers=headers,
+        json=data
+    )
+    if response.status_code not in (200, 201):
+        logger.error(f"Supabase upload failed: {response.text}")
+    else:
+        logger.info("Session uploaded to Supabase")
+
+def update_session_in_supabase(
+    session_id: str,
+    end_time: datetime.datetime,
+    start_time: datetime.datetime,
+    status: str = "completed",
+    livekit_room_name: str = None,
+    livekit_participant_id: str = None
+):
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    user_id = os.getenv("SUPABASE_USER_ID")
+    agent_rate = float(os.getenv("AGENT_RATE_PER_MIN", "0.16"))
+    table = "agent_sessions"
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+    duration_minutes = round((end_time - start_time).total_seconds() / 60, 2)
+    cost = round(duration_minutes * agent_rate, 2)
+    data = {
+        "end_time": end_time.isoformat(),
+        "duration_minutes": duration_minutes,
+        "cost": cost,
+        "status": status,
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+    response = requests.patch(
+        f"{supabase_url}/rest/v1/{table}?session_id=eq.{session_id}",
+        headers=headers,
+        json=data
+    )
+    if response.status_code not in (200, 204):
+        logger.error(f"Supabase update failed: {response.text}")
+    else:
+        logger.info("Session updated in Supabase")
+
 async def entrypoint(ctx: JobContext):
     await ctx.connect()
     timezone = "Asia/Riyadh"
-    
-    # Initialize Google Sheets manager if credentials are available
     sheets_manager = None
+    # Initialize Google Sheets manager if credentials are available
     if GOOGLE_SHEETS_AVAILABLE:
         credentials_file = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
         spreadsheet_id = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
@@ -495,15 +566,40 @@ async def entrypoint(ctx: JobContext):
             azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
         ),
         vad=silero.VAD.load(),
-        max_tool_steps=2,  # Increased to allow for intent recognition + action
-        # Turn detection for better conversational flow in Arabic
+        max_tool_steps=2,
         turn_detection=MultilingualModel() if TURN_DETECTOR_AVAILABLE else None,
     )
-    
-    await session.start(
-        agent=ShuraLegalAgent(timezone=timezone, sheets_manager=sheets_manager), 
-        room=ctx.room
+
+    # Upload session record to Supabase (start)
+    session_id = session.id if hasattr(session, "id") else "session-id"
+    start_time = datetime.datetime.now(datetime.timezone.utc)
+    livekit_room_name = ctx.room.name if hasattr(ctx.room, "name") else None
+    livekit_participant_id = None
+
+    upload_session_to_supabase(
+        session_id=session_id,
+        start_time=start_time,
+        livekit_room_name=livekit_room_name,
+        livekit_participant_id=livekit_participant_id,
+        status="active"
     )
+
+    # Run the session and record end time
+    try:
+        await session.start(
+            agent=ShuraLegalAgent(timezone=timezone, sheets_manager=sheets_manager), 
+            room=ctx.room
+        )
+    finally:
+        end_time = datetime.datetime.now(datetime.timezone.utc)
+        update_session_in_supabase(
+            session_id=session_id,
+            end_time=end_time,
+            start_time=start_time,
+            status="completed",
+            livekit_room_name=livekit_room_name,
+            livekit_participant_id=livekit_participant_id
+        )
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
